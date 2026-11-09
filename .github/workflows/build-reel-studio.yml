@@ -1,0 +1,1020 @@
+name: Build Reel Studio APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Write the app project files
+        run: |
+          set -e
+          mkdir -p app app/src/main app/src/main/java/com/reelstudio/app app/src/main/res/drawable
+          cat > app/build.gradle <<'REELEOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.reelstudio.app'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.reelstudio.app'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          REELEOF
+          cat > app/src/main/AndroidManifest.xml <<'REELEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@drawable/icon"
+                  android:label="Reel Studio"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/plain" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/html" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="content" android:mimeType="text/html" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="file" android:mimeType="text/html" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".PlayerActivity"
+                      android:exported="false"
+                      android:screenOrientation="sensorLandscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode" />
+
+                  <service
+                      android:name=".RecorderService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+              </application>
+          </manifest>
+          REELEOF
+          cat > app/src/main/java/com/reelstudio/app/MainActivity.java <<'REELEOF'
+          package com.reelstudio.app;
+
+          import android.app.Activity;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import java.io.InputStream;
+
+          public class MainActivity extends Activity {
+              private EditText edit;
+              private TextView status;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  ScrollView sv = new ScrollView(this);
+                  sv.setBackgroundColor(Color.parseColor("#0A0B0E"));
+                  LinearLayout col = new LinearLayout(this);
+                  col.setOrientation(LinearLayout.VERTICAL);
+                  col.setPadding(dp(20), dp(40), dp(20), dp(28));
+                  sv.addView(col);
+
+                  TextView title = new TextView(this);
+                  title.setText("Reel Studio");
+                  title.setTextSize(28);
+                  title.setTypeface(Typeface.DEFAULT_BOLD);
+                  title.setTextColor(Color.WHITE);
+                  col.addView(title);
+
+                  TextView help = new TextView(this);
+                  help.setText("Paste the code of an HTML animation (for example a Claude artifact), or share it to this app. "
+                          + "Play it full-screen, then record it to an MP4 you can save and edit.");
+                  help.setTextSize(15);
+                  help.setTextColor(Color.parseColor("#9A978D"));
+                  col.addView(help, params(dp(8)));
+
+                  edit = new EditText(this);
+                  edit.setHint("Paste HTML code here");
+                  edit.setHintTextColor(Color.parseColor("#6B6A63"));
+                  edit.setTextColor(Color.WHITE);
+                  edit.setBackgroundColor(Color.parseColor("#14161B"));
+                  edit.setGravity(Gravity.TOP | Gravity.START);
+                  edit.setMinLines(8);
+                  edit.setMaxLines(12);
+                  edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+                  edit.setTextSize(12);
+                  edit.setTypeface(Typeface.MONOSPACE);
+                  edit.setPadding(dp(10), dp(10), dp(10), dp(10));
+                  col.addView(edit, params(dp(18)));
+
+                  status = new TextView(this);
+                  status.setTextSize(14);
+                  status.setTextColor(Color.parseColor("#FF9A1F"));
+                  col.addView(status, params(dp(10)));
+
+                  col.addView(button("Paste from clipboard", new View.OnClickListener() {
+                      @Override public void onClick(View v) { pasteClipboard(); }
+                  }), params(dp(12)));
+                  col.addView(button("Open an .html file", new View.OnClickListener() {
+                      @Override public void onClick(View v) { pickFile(); }
+                  }), params(dp(8)));
+                  Button play = button("Play and record", new View.OnClickListener() {
+                      @Override public void onClick(View v) { play(); }
+                  });
+                  play.setBackgroundColor(Color.parseColor("#FF9A1F"));
+                  play.setTextColor(Color.parseColor("#1A1000"));
+                  col.addView(play, params(dp(8)));
+
+                  setContentView(sv);
+                  handle(getIntent());
+              }
+
+              @Override
+              protected void onNewIntent(Intent i) {
+                  super.onNewIntent(i);
+                  setIntent(i);
+                  handle(i);
+              }
+
+              private void handle(Intent i) {
+                  if (i == null) return;
+                  String a = i.getAction();
+                  try {
+                      String text = null;
+                      if (Intent.ACTION_SEND.equals(a)) {
+                          Uri u = i.getParcelableExtra(Intent.EXTRA_STREAM);
+                          if (u != null) text = readUri(u);
+                          else text = i.getStringExtra(Intent.EXTRA_TEXT);
+                      } else if (Intent.ACTION_VIEW.equals(a) && i.getData() != null) {
+                          text = readUri(i.getData());
+                      }
+                      if (text != null && !text.trim().isEmpty()) {
+                          edit.setText(text);
+                          status.setText("Loaded " + text.length() + " characters. Tap Play and record.");
+                      }
+                  } catch (Exception e) {
+                      status.setText("Could not read that: " + e.getMessage());
+                  }
+              }
+
+              private String readUri(Uri u) throws Exception {
+                  try (InputStream in = getContentResolver().openInputStream(u)) {
+                      if (in == null) throw new Exception("empty stream");
+                      return Store.readAll(in);
+                  }
+              }
+
+              private void pasteClipboard() {
+                  ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                  ClipData d = cm == null ? null : cm.getPrimaryClip();
+                  if (d == null || d.getItemCount() == 0) {
+                      status.setText("The clipboard is empty.");
+                      return;
+                  }
+                  CharSequence t = d.getItemAt(0).coerceToText(this);
+                  edit.setText(t);
+                  status.setText("Pasted " + t.length() + " characters.");
+              }
+
+              private void pickFile() {
+                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  i.setType("*/*");
+                  startActivityForResult(i, 1);
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req == 1 && res == RESULT_OK && data != null && data.getData() != null) {
+                      try {
+                          String t = readUri(data.getData());
+                          edit.setText(t);
+                          status.setText("Opened file, " + t.length() + " characters.");
+                      } catch (Exception e) {
+                          status.setText("Could not open that file: " + e.getMessage());
+                      }
+                  }
+              }
+
+              private void play() {
+                  String html = edit.getText().toString();
+                  try {
+                      if (html.trim().isEmpty()) {
+                          if (!Store.file(this).exists()) {
+                              status.setText("Paste some code first.");
+                              return;
+                          }
+                      } else {
+                          Store.save(this, html);
+                      }
+                      startActivity(new Intent(this, PlayerActivity.class));
+                  } catch (Exception e) {
+                      status.setText("Could not start: " + e.getMessage());
+                  }
+              }
+
+              private Button button(String t, View.OnClickListener l) {
+                  Button b = new Button(this);
+                  b.setText(t);
+                  b.setAllCaps(false);
+                  b.setTextSize(16);
+                  b.setOnClickListener(l);
+                  return b;
+              }
+
+              private LinearLayout.LayoutParams params(int top) {
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                  p.topMargin = top;
+                  return p;
+              }
+
+              private int dp(int v) {
+                  return (int) (v * getResources().getDisplayMetrics().density);
+              }
+          }
+          REELEOF
+          cat > app/src/main/java/com/reelstudio/app/PlayerActivity.java <<'REELEOF'
+          package com.reelstudio.app;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.ActivityNotFoundException;
+          import android.content.DialogInterface;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.media.projection.MediaProjectionManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.util.DisplayMetrics;
+          import android.view.Gravity;
+          import android.view.KeyEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import java.io.File;
+
+          public class PlayerActivity extends Activity implements RecorderService.Listener {
+              private static final String START_JS =
+                      "(function(){try{if(window.__reel&&window.__reel.start){window.__reel.start();return 1}}catch(e){}return 0})()";
+
+              private WebView web;
+              private LinearLayout bar;
+              private TextView count;
+              private final Handler h = new Handler(Looper.getMainLooper());
+              private boolean recording, starting, askedNotif;
+              private int cw, ch, dpi;
+              private final Runnable maxStop = new Runnable() {
+                  @Override public void run() { stopRec(); }
+              };
+
+              public class Bridge {
+                  @JavascriptInterface
+                  public void done() {
+                      runOnUiThread(new Runnable() {
+                          @Override public void run() { if (recording) stopRec(); }
+                      });
+                  }
+              }
+
+              @Override
+              protected void onCreate(android.os.Bundle b) {
+                  super.onCreate(b);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  if (Build.VERSION.SDK_INT >= 28) {
+                      WindowManager.LayoutParams lp = getWindow().getAttributes();
+                      lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                      getWindow().setAttributes(lp);
+                  }
+                  FrameLayout root = new FrameLayout(this);
+                  root.setBackgroundColor(Color.BLACK);
+
+                  web = new WebView(this);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+                  web.setBackgroundColor(Color.BLACK);
+                  web.setWebViewClient(new WebViewClient());
+                  web.addJavascriptInterface(new Bridge(), "ReelBridge");
+                  root.addView(web, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+                  bar = new LinearLayout(this);
+                  bar.setOrientation(LinearLayout.HORIZONTAL);
+                  Button rec = new Button(this);
+                  rec.setText("Record MP4");
+                  rec.setAllCaps(false);
+                  rec.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { onRec(); }
+                  });
+                  Button close = new Button(this);
+                  close.setText("Close");
+                  close.setAllCaps(false);
+                  close.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { finish(); }
+                  });
+                  bar.addView(rec);
+                  bar.addView(close);
+                  FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                          Gravity.TOP | Gravity.END);
+                  bp.setMargins(8, 8, 8, 8);
+                  root.addView(bar, bp);
+
+                  count = new TextView(this);
+                  count.setTextSize(96);
+                  count.setTextColor(Color.WHITE);
+                  count.setShadowLayer(12, 0, 0, Color.BLACK);
+                  count.setVisibility(View.GONE);
+                  root.addView(count, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+
+                  setContentView(root);
+                  String html = Store.load(this);
+                  web.loadDataWithBaseURL("https://reel.local/",
+                          html == null ? "<p style='color:#fff'>No code loaded.</p>" : html,
+                          "text/html", "utf-8", null);
+              }
+
+              @Override
+              public void onWindowFocusChanged(boolean focus) {
+                  super.onWindowFocusChanged(focus);
+                  if (focus) {
+                      getWindow().getDecorView().setSystemUiVisibility(
+                              View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN
+                                      | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                                      | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+                  }
+              }
+
+              private void measure() {
+                  DisplayMetrics m = new DisplayMetrics();
+                  getWindowManager().getDefaultDisplay().getRealMetrics(m);
+                  float sc = Math.min(1f, 1920f / Math.max(m.widthPixels, m.heightPixels));
+                  cw = Math.round(m.widthPixels * sc) & ~1;
+                  ch = Math.round(m.heightPixels * sc) & ~1;
+                  dpi = m.densityDpi;
+              }
+
+              private void onRec() {
+                  if (recording || starting) return;
+                  if (Build.VERSION.SDK_INT < 29
+                          && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 7);
+                      return;
+                  }
+                  if (Build.VERSION.SDK_INT >= 33 && !askedNotif
+                          && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                      askedNotif = true;
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 8);
+                      return;
+                  }
+                  starting = true;
+                  MediaProjectionManager m = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+                  startActivityForResult(m.createScreenCaptureIntent(), 100);
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int rc, String[] perms, int[] res) {
+                  super.onRequestPermissionsResult(rc, perms, res);
+                  if (rc == 7) {
+                      if (res.length == 0 || res[0] != PackageManager.PERMISSION_GRANTED) {
+                          Toast.makeText(this, "Storage permission is needed to save the video.", Toast.LENGTH_LONG).show();
+                          return;
+                      }
+                      onRec();
+                  } else if (rc == 8) {
+                      onRec();
+                  }
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req != 100) return;
+                  if (res != RESULT_OK || data == null) {
+                      starting = false;
+                      Toast.makeText(this, "Recording cancelled.", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  measure();
+                  Intent s = new Intent(this, RecorderService.class);
+                  s.setAction("start");
+                  s.putExtra("rc", res);
+                  s.putExtra("data", data);
+                  s.putExtra("w", cw);
+                  s.putExtra("h", ch);
+                  s.putExtra("dpi", dpi);
+                  RecorderService.listener = this;
+                  if (Build.VERSION.SDK_INT >= 26) startForegroundService(s);
+                  else startService(s);
+              }
+
+              @Override
+              public void onReady() {
+                  bar.setVisibility(View.GONE);
+                  countdown(3);
+              }
+
+              private void countdown(final int n) {
+                  if (!starting) return;
+                  if (n == 0) {
+                      count.setVisibility(View.GONE);
+                      beginRec();
+                      return;
+                  }
+                  count.setText(String.valueOf(n));
+                  count.setVisibility(View.VISIBLE);
+                  h.postDelayed(new Runnable() {
+                      @Override public void run() { countdown(n - 1); }
+                  }, 1000);
+              }
+
+              private void beginRec() {
+                  RecorderService s = RecorderService.inst;
+                  if (s == null) {
+                      onError("The recorder stopped unexpectedly.");
+                      return;
+                  }
+                  recording = true;
+                  starting = false;
+                  s.begin();
+                  web.evaluateJavascript(START_JS, null);
+                  h.postDelayed(maxStop, 15 * 60 * 1000L);
+              }
+
+              private void stopRec() {
+                  h.removeCallbacks(maxStop);
+                  if (!recording) return;
+                  recording = false;
+                  RecorderService s = RecorderService.inst;
+                  if (s != null) s.finish();
+                  else bar.setVisibility(View.VISIBLE);
+              }
+
+              private void cancelStart() {
+                  h.removeCallbacksAndMessages(null);
+                  count.setVisibility(View.GONE);
+                  RecorderService s = RecorderService.inst;
+                  if (s != null) s.cancel();
+                  starting = false;
+                  bar.setVisibility(View.VISIBLE);
+              }
+
+              @Override
+              public void onSaved(final File f) {
+                  recording = false;
+                  starting = false;
+                  bar.setVisibility(View.VISIBLE);
+                  Toast.makeText(this, "Saving video...", Toast.LENGTH_SHORT).show();
+                  new Thread(new Runnable() {
+                      @Override public void run() {
+                          Uri u = null;
+                          String err = null;
+                          try {
+                              u = Saver.toMovies(PlayerActivity.this, f);
+                              f.delete();
+                          } catch (Exception e) {
+                              err = String.valueOf(e.getMessage());
+                          }
+                          final Uri fu = u;
+                          final String fe = err;
+                          runOnUiThread(new Runnable() {
+                              @Override public void run() { showDone(fu, f, fe); }
+                          });
+                      }
+                  }).start();
+              }
+
+              @Override
+              public void onError(String message) {
+                  recording = false;
+                  starting = false;
+                  h.removeCallbacksAndMessages(null);
+                  count.setVisibility(View.GONE);
+                  bar.setVisibility(View.VISIBLE);
+                  Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+              }
+
+              private void showDone(final Uri u, File f, String err) {
+                  AlertDialog.Builder d = new AlertDialog.Builder(this);
+                  if (u == null) {
+                      d.setTitle("Could not save to Movies")
+                              .setMessage((err == null ? "" : err + "\n\n") + "The video is in the app folder:\n" + f.getAbsolutePath())
+                              .setPositiveButton("Close", null)
+                              .show();
+                      return;
+                  }
+                  d.setTitle("Video saved")
+                          .setMessage("Find it in Gallery or Files under Movies / ReelStudio.")
+                          .setPositiveButton("Play", new DialogInterface.OnClickListener() {
+                              @Override public void onClick(DialogInterface di, int w) {
+                                  Intent v = new Intent(Intent.ACTION_VIEW);
+                                  v.setDataAndType(u, "video/mp4");
+                                  v.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                                  try { startActivity(v); }
+                                  catch (ActivityNotFoundException e) {
+                                      Toast.makeText(PlayerActivity.this, "No video player found.", Toast.LENGTH_SHORT).show();
+                                  }
+                              }
+                          })
+                          .setNeutralButton("Share", new DialogInterface.OnClickListener() {
+                              @Override public void onClick(DialogInterface di, int w) {
+                                  Intent s = new Intent(Intent.ACTION_SEND);
+                                  s.setType("video/mp4");
+                                  s.putExtra(Intent.EXTRA_STREAM, u);
+                                  s.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                                  startActivity(Intent.createChooser(s, "Share video"));
+                              }
+                          })
+                          .setNegativeButton("Close", null)
+                          .show();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (recording) { stopRec(); return; }
+                  if (starting) { cancelStart(); return; }
+                  super.onBackPressed();
+              }
+
+              @Override
+              public boolean onKeyDown(int keyCode, KeyEvent e) {
+                  if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN && recording) {
+                      stopRec();
+                      return true;
+                  }
+                  return super.onKeyDown(keyCode, e);
+              }
+
+              @Override
+              protected void onDestroy() {
+                  h.removeCallbacksAndMessages(null);
+                  if (RecorderService.listener == this) RecorderService.listener = null;
+                  RecorderService s = RecorderService.inst;
+                  if (s != null && (recording || starting)) s.cancel();
+                  web.destroy();
+                  super.onDestroy();
+              }
+          }
+          REELEOF
+          cat > app/src/main/java/com/reelstudio/app/RecorderService.java <<'REELEOF'
+          package com.reelstudio.app;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.hardware.display.DisplayManager;
+          import android.hardware.display.VirtualDisplay;
+          import android.media.MediaRecorder;
+          import android.media.projection.MediaProjection;
+          import android.media.projection.MediaProjectionManager;
+          import android.os.Build;
+          import android.os.Environment;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import java.io.File;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          public class RecorderService extends Service {
+              public interface Listener {
+                  void onReady();
+                  void onSaved(File f);
+                  void onError(String message);
+              }
+
+              static Listener listener;
+              static RecorderService inst;
+
+              private MediaProjection proj;
+              private MediaRecorder rec;
+              private VirtualDisplay vd;
+              private File out;
+              private boolean recording, closed, silent;
+
+              @Override
+              public IBinder onBind(Intent i) {
+                  return null;
+              }
+
+              @Override
+              public int onStartCommand(Intent i, int flags, int startId) {
+                  inst = this;
+                  String a = i == null ? null : i.getAction();
+                  if ("start".equals(a)) {
+                      foreground();
+                      try {
+                          prepare(i);
+                      } catch (Exception e) {
+                          fail(String.valueOf(e.getMessage()));
+                      }
+                  } else if ("stop".equals(a)) {
+                      finish();
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              private void foreground() {
+                  String ch = "reel";
+                  NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      nm.createNotificationChannel(new NotificationChannel(ch, "Recording", NotificationManager.IMPORTANCE_LOW));
+                  }
+                  Intent si = new Intent(this, RecorderService.class).setAction("stop");
+                  int fl = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+                  PendingIntent pi = PendingIntent.getService(this, 1, si, fl);
+                  Notification.Builder b = Build.VERSION.SDK_INT >= 26
+                          ? new Notification.Builder(this, ch)
+                          : new Notification.Builder(this);
+                  b.setSmallIcon(android.R.drawable.ic_media_play)
+                          .setContentTitle("Reel Studio is recording")
+                          .setContentText("Tap Stop to finish and save")
+                          .setOngoing(true)
+                          .addAction(android.R.drawable.ic_media_pause, "Stop", pi);
+                  Notification n = b.build();
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                  } else {
+                      startForeground(1, n);
+                  }
+              }
+
+              @SuppressWarnings("deprecation")
+              private void prepare(Intent i) throws Exception {
+                  int rc = i.getIntExtra("rc", 0);
+                  Intent data = i.getParcelableExtra("data");
+                  int w = i.getIntExtra("w", 1280);
+                  int h = i.getIntExtra("h", 720);
+                  int dpi = i.getIntExtra("dpi", 320);
+                  MediaProjectionManager m = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+                  proj = m.getMediaProjection(rc, data);
+                  proj.registerCallback(new MediaProjection.Callback() {
+                      @Override public void onStop() {
+                          if (recording) finish();
+                      }
+                  }, new Handler(Looper.getMainLooper()));
+                  String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+                  File dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES);
+                  if (dir == null) dir = getFilesDir();
+                  dir.mkdirs();
+                  out = new File(dir, "reel_" + stamp + ".mp4");
+                  try {
+                      setup(w, h, dpi);
+                  } catch (Exception first) {
+                      releaseRecorder();
+                      float s = 1280f / Math.max(w, h);
+                      setup(even(Math.round(w * s)), even(Math.round(h * s)), dpi);
+                  }
+                  if (listener != null) listener.onReady();
+              }
+
+              private void setup(int w, int h, int dpi) throws Exception {
+                  rec = new MediaRecorder();
+                  rec.setVideoSource(MediaRecorder.VideoSource.SURFACE);
+                  rec.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+                  rec.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+                  rec.setVideoSize(w, h);
+                  rec.setVideoFrameRate(30);
+                  rec.setVideoEncodingBitRate(8000000);
+                  rec.setOutputFile(out.getAbsolutePath());
+                  rec.prepare();
+                  vd = proj.createVirtualDisplay("reel", w, h, dpi,
+                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, rec.getSurface(), null, null);
+              }
+
+              private static int even(int v) {
+                  return v & ~1;
+              }
+
+              private void releaseRecorder() {
+                  try { if (vd != null) vd.release(); } catch (Exception e) { }
+                  vd = null;
+                  try { if (rec != null) rec.release(); } catch (Exception e) { }
+                  rec = null;
+              }
+
+              void begin() {
+                  try {
+                      rec.start();
+                      recording = true;
+                  } catch (Exception e) {
+                      fail("Could not start the recorder: " + e.getMessage());
+                  }
+              }
+
+              void cancel() {
+                  silent = true;
+                  finish();
+              }
+
+              void finish() {
+                  if (closed) return;
+                  closed = true;
+                  boolean ok = false;
+                  try {
+                      if (recording && rec != null) {
+                          rec.stop();
+                          ok = true;
+                      }
+                  } catch (RuntimeException e) {
+                      ok = false;
+                  }
+                  recording = false;
+                  releaseRecorder();
+                  try { if (proj != null) proj.stop(); } catch (Exception e) { }
+                  stopForeground(true);
+                  stopSelf();
+                  inst = null;
+                  if (silent || listener == null) return;
+                  if (ok && out != null && out.length() > 0) listener.onSaved(out);
+                  else listener.onError("The recording was too short or failed.");
+              }
+
+              private void fail(String msg) {
+                  if (closed) return;
+                  closed = true;
+                  recording = false;
+                  releaseRecorder();
+                  try { if (proj != null) proj.stop(); } catch (Exception e) { }
+                  stopForeground(true);
+                  stopSelf();
+                  inst = null;
+                  if (listener != null) listener.onError(msg);
+              }
+
+              @Override
+              public void onDestroy() {
+                  super.onDestroy();
+                  if (inst == this) inst = null;
+              }
+          }
+          REELEOF
+          cat > app/src/main/java/com/reelstudio/app/Saver.java <<'REELEOF'
+          package com.reelstudio.app;
+
+          import android.content.ContentResolver;
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+
+          final class Saver {
+              private Saver() {}
+
+              /** Copies the recorded file into the public Movies/ReelStudio folder and returns its content Uri. */
+              static Uri toMovies(Context c, File src) throws IOException {
+                  String name = src.getName();
+                  ContentResolver cr = c.getContentResolver();
+                  ContentValues v = new ContentValues();
+                  v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                  v.put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4");
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/ReelStudio");
+                      v.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                      Uri u = cr.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v);
+                      if (u == null) throw new IOException("Could not create the video entry");
+                      try (InputStream in = new FileInputStream(src); OutputStream out = cr.openOutputStream(u)) {
+                          if (out == null) throw new IOException("Could not open the video entry");
+                          copy(in, out);
+                      }
+                      ContentValues d = new ContentValues();
+                      d.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                      cr.update(u, d, null, null);
+                      return u;
+                  }
+                  File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "ReelStudio");
+                  if (!dir.exists() && !dir.mkdirs()) throw new IOException("Could not create the Movies folder");
+                  File dst = new File(dir, name);
+                  try (InputStream in = new FileInputStream(src); OutputStream out = new FileOutputStream(dst)) {
+                      copy(in, out);
+                  }
+                  v.put(MediaStore.MediaColumns.DATA, dst.getAbsolutePath());
+                  return cr.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v);
+              }
+
+              private static void copy(InputStream in, OutputStream out) throws IOException {
+                  byte[] buf = new byte[64 * 1024];
+                  int n;
+                  while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                  out.flush();
+              }
+          }
+          REELEOF
+          cat > app/src/main/java/com/reelstudio/app/Store.java <<'REELEOF'
+          package com.reelstudio.app;
+
+          import android.content.Context;
+          import java.io.ByteArrayOutputStream;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.nio.charset.StandardCharsets;
+          import java.util.Locale;
+
+          final class Store {
+              private Store() {}
+
+              static File file(Context c) {
+                  return new File(c.getFilesDir(), "last.html");
+              }
+
+              /** Pasted artifact code has no doctype or body, so wrap it the way a browser page would be. */
+              static String normalize(String s) {
+                  String low = s.toLowerCase(Locale.ROOT);
+                  if (low.contains("<html") || low.contains("<!doctype")) return s;
+                  return "<!doctype html><html><head><meta charset=\"utf-8\">"
+                          + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
+                          + "<style>body{margin:0;font-family:sans-serif}[hidden]{display:none!important}</style>"
+                          + "</head><body>" + s + "</body></html>";
+              }
+
+              static void save(Context c, String html) throws IOException {
+                  try (OutputStream o = new FileOutputStream(file(c))) {
+                      o.write(normalize(html).getBytes(StandardCharsets.UTF_8));
+                  }
+              }
+
+              static String load(Context c) {
+                  File f = file(c);
+                  if (!f.exists()) return null;
+                  try (InputStream in = new FileInputStream(f)) {
+                      return readAll(in);
+                  } catch (IOException e) {
+                      return null;
+                  }
+              }
+
+              static String readAll(InputStream in) throws IOException {
+                  ByteArrayOutputStream b = new ByteArrayOutputStream();
+                  byte[] buf = new byte[8192];
+                  int n;
+                  while ((n = in.read(buf)) > 0) b.write(buf, 0, n);
+                  return new String(b.toByteArray(), StandardCharsets.UTF_8);
+              }
+          }
+          REELEOF
+          cat > app/src/main/res/drawable/icon.xml <<'REELEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="48dp"
+              android:height="48dp"
+              android:viewportWidth="48"
+              android:viewportHeight="48">
+              <path android:fillColor="#0A0B0E" android:pathData="M0,0h48v48h-48z"/>
+              <path android:fillColor="#FF9A1F" android:pathData="M18,13l19,11l-19,11z"/>
+          </vector>
+          REELEOF
+          cat > build.gradle <<'REELEOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          REELEOF
+          cat > gradle.properties <<'REELEOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.nonTransitiveRClass=true
+          REELEOF
+          cat > settings.gradle <<'REELEOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ReelStudio"
+          include ':app'
+          REELEOF
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Build the APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Name the APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk ReelStudio.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReelStudio-apk
+          path: ReelStudio.apk
+
+      - name: Publish a release with the APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: reel-studio-${{ github.run_number }}
+          name: Reel Studio build ${{ github.run_number }}
+          files: ReelStudio.apk
